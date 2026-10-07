@@ -1,0 +1,6 @@
+# Local configuration for positron-slurm.
+# This file is sourced by the local helper scripts.
+
+LOGIN_TARGET="ys01849@sapelo2.gacrc.uga.edu"
+SHARED_DIR="/work/whlab/ys01849/.positron-slurm"
+LOCAL_PORT=22022
