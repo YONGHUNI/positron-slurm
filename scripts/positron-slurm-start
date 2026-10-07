@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CONFIG="${POSITRON_SLURM_CONFIG:-$HOME/.config/positron-slurm/config}"
+SBATCH_FILE="$REPO_DIR/slurm/positron-session.sbatch"
+
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Missing config: $CONFIG" >&2
+    echo "Copy examples/config.example to that path and edit it first." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG"
+
+: "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
+: "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
+
+remote_sbatch=(sbatch --parsable)
+for arg in "$@"; do
+    remote_sbatch+=("$arg")
+done
+remote_sbatch+=("-")
+
+printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
+
+ssh -n "$LOGIN_TARGET" "mkdir -p '$SHARED_DIR' && chmod 700 '$SHARED_DIR' && rm -f '$SHARED_DIR/current'"
+
+SUBMIT="$(
+    ssh "$LOGIN_TARGET" "$remote_cmd" < "$SBATCH_FILE"
+)"
+JOB="${SUBMIT%%;*}"
+
+if [[ ! "$JOB" =~ ^[0-9]+$ ]]; then
+    echo "Could not parse Slurm job ID from: $SUBMIT" >&2
+    exit 1
+fi
+
+echo "Submitted Positron Slurm job $JOB"
+echo "Waiting for endpoint..."
+
+deadline=$((SECONDS + 300))
+while (( SECONDS < deadline )); do
+    DATA="$(ssh -n "$LOGIN_TARGET" "cat '$SHARED_DIR/current' 2>/dev/null || true")"
+    STATE_JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
+
+    if [[ "$STATE_JOB" == "$JOB" ]]; then
+        printf '%s\n' "$DATA"
+        "$SCRIPT_DIR/positron-slurm-tunnel"
+        echo
+        echo "Connect Positron to SSH target: sapelo-slurm"
+        exit 0
+    fi
+
+    STATUS="$(ssh -n "$LOGIN_TARGET" "squeue -h -j '$JOB' -o '%T' 2>/dev/null || true")"
+    if [[ -z "$STATUS" ]]; then
+        echo "Job $JOB left the queue before publishing an endpoint." >&2
+        ssh -n "$LOGIN_TARGET" "tail -n 60 '$SHARED_DIR/slurm-$JOB.err' '$SHARED_DIR/slurm-$JOB.out' 2>/dev/null || true" >&2
+        exit 1
+    fi
+
+    printf '\rJob %s: %s   ' "$JOB" "$STATUS"
+    sleep 2
+done
+
+echo >&2
+echo "Timed out waiting for job $JOB." >&2
+exit 1
