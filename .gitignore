@@ -1,0 +1,5 @@
+# Local configuration and transient state
+config
+.env
+*.log
+.DS_Store
