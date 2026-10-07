@@ -15,6 +15,7 @@ source "$CONFIG"
 
 : "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
 : "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
+: "${PARTITION:=inter_p}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
 CONTROL_SOCKET="$CACHE_DIR/login-master.sock"
@@ -68,9 +69,24 @@ if ! remote_login "command -v sbatch >/dev/null"; then
 fi
 
 remote_sbatch=(sbatch --parsable)
+
+has_partition=false
+for arg in "$@"; do
+    case "$arg" in
+        -p|--partition|-p*|--partition=*)
+            has_partition=true
+            ;;
+    esac
+done
+
+if [[ "$has_partition" == false ]]; then
+    remote_sbatch+=(--partition="$PARTITION")
+fi
+
 for arg in "$@"; do
     remote_sbatch+=("$arg")
 done
+
 printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
 printf -v quoted_remote_cmd '%q' "$remote_cmd"
 
@@ -90,6 +106,7 @@ if [[ ! "$JOB" =~ ^[0-9]+$ ]]; then
 fi
 
 echo "Submitted Positron Slurm job $JOB"
+echo "Partition: ${PARTITION}"
 echo "Waiting for endpoint..."
 
 deadline=$((SECONDS + 300))
