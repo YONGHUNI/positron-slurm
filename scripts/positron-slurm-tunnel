@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="${POSITRON_SLURM_CONFIG:-$HOME/.config/positron-slurm/config}"
+
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Missing config: $CONFIG" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG"
+
+: "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
+: "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
+: "${LOCAL_PORT:=22022}"
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
+CONTROL_SOCKET="$CACHE_DIR/tunnel.sock"
+mkdir -p "$CACHE_DIR"
+
+DATA="$(
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 \
+        "$LOGIN_TARGET" "cat '$SHARED_DIR/current'"
+)"
+
+HOST="$(printf '%s\n' "$DATA" | awk -F= '$1=="HOST" {print $2}')"
+PORT="$(printf '%s\n' "$DATA" | awk -F= '$1=="PORT" {print $2}')"
+JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
+
+if [[ -z "$HOST" || -z "$PORT" || -z "$JOB" ]]; then
+    echo "Invalid Slurm endpoint state:" >&2
+    printf '%s\n' "$DATA" >&2
+    exit 1
+fi
+
+if [[ -S "$CONTROL_SOCKET" ]]; then
+    ssh -S "$CONTROL_SOCKET" -O exit "$LOGIN_TARGET" >/dev/null 2>&1 || true
+    rm -f "$CONTROL_SOCKET"
+fi
+
+if command -v ss >/dev/null 2>&1 && ss -H -ltn | awk '{print $4}' | grep -q ":${LOCAL_PORT}$"; then
+    echo "Local port $LOCAL_PORT is already in use." >&2
+    exit 1
+fi
+
+ssh \
+    -M \
+    -S "$CONTROL_SOCKET" \
+    -fNT \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -L "127.0.0.1:${LOCAL_PORT}:${HOST}:${PORT}" \
+    "$LOGIN_TARGET"
+
+cat > "$CACHE_DIR/current" <<EOF
+HOST=$HOST
+PORT=$PORT
+JOB=$JOB
+LOCAL_PORT=$LOCAL_PORT
+EOF
+
+echo "Positron Slurm tunnel ready"
+echo "LOCAL=127.0.0.1:$LOCAL_PORT"
+echo "REMOTE=$HOST:$PORT"
+echo "JOB=$JOB"
