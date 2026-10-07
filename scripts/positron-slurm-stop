@@ -13,29 +13,59 @@ source "$CONFIG"
 : "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
-CONTROL_SOCKET="$CACHE_DIR/tunnel.sock"
+CONTROL_SOCKET="$CACHE_DIR/login-master.sock"
+LEGACY_SOCKET="$CACHE_DIR/tunnel.sock"
 
-remote_login() {
+master_alive() {
+    ssh -S "$CONTROL_SOCKET" -O check "$LOGIN_TARGET" >/dev/null 2>&1
+}
+
+master_ssh() {
+    ssh \
+        -S "$CONTROL_SOCKET" \
+        -o ControlMaster=auto \
+        "$LOGIN_TARGET" \
+        "$@"
+}
+
+remote_login_master() {
     local cmd="$1"
     local quoted
     printf -v quoted '%q' "$cmd"
-    ssh -n "$LOGIN_TARGET" "bash -lc $quoted"
+    master_ssh "bash -lc $quoted"
 }
 
-DATA="$(ssh -n "$LOGIN_TARGET" "cat '$SHARED_DIR/current' 2>/dev/null || true")"
-JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
+if master_alive; then
+    DATA="$(master_ssh "cat '$SHARED_DIR/current' 2>/dev/null || true")"
+    JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
 
-if [[ -n "$JOB" ]]; then
-    echo "Cancelling Slurm job $JOB"
-    remote_login "scancel '$JOB' || true"
-else
-    echo "No current Slurm endpoint found."
-fi
+    if [[ -n "$JOB" ]]; then
+        echo "Cancelling Slurm job $JOB"
+        remote_login_master "scancel '$JOB' || true"
+    else
+        echo "No current Slurm endpoint found."
+    fi
 
-if [[ -S "$CONTROL_SOCKET" ]]; then
-    echo "Closing local SSH tunnel"
+    echo "Closing Sapelo SSH control connection and tunnel"
     ssh -S "$CONTROL_SOCKET" -O exit "$LOGIN_TARGET" >/dev/null 2>&1 || true
     rm -f "$CONTROL_SOCKET"
+else
+    DATA="$(ssh -n "$LOGIN_TARGET" "cat '$SHARED_DIR/current' 2>/dev/null || true")"
+    JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
+
+    if [[ -n "$JOB" ]]; then
+        echo "Cancelling Slurm job $JOB"
+        printf -v quoted '%q' "scancel '$JOB' || true"
+        ssh -n "$LOGIN_TARGET" "bash -lc $quoted"
+    else
+        echo "No current Slurm endpoint found."
+    fi
+fi
+
+# Clean up control sockets created by the earlier implementation, if any.
+if [[ -S "$LEGACY_SOCKET" ]]; then
+    ssh -S "$LEGACY_SOCKET" -O exit "$LOGIN_TARGET" >/dev/null 2>&1 || true
+    rm -f "$LEGACY_SOCKET"
 fi
 
 rm -f "$CACHE_DIR/current"
