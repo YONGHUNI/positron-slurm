@@ -27,6 +27,8 @@ Slurm job cgroup
 
 The key property is that the user-level `sshd` is launched **inside the batch allocation**, so every process started through the Positron Remote SSH session inherits the Slurm job cgroup.
 
+The local helpers keep a single authenticated OpenSSH ControlMaster connection to the login node for submission, queue polling, endpoint discovery, and the final TCP forward. This avoids repeated login/authentication attempts on clusters where login connections are unreliable.
+
 ## Repository layout
 
 - `slurm/positron-session.sbatch` — batch job that launches the job-local SSH endpoint.
