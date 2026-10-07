@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="${POSITRON_SLURM_CONFIG:-$HOME/.config/positron-slurm/config}"
+if [[ ! -f "$CONFIG" ]]; then
+    echo "Missing config: $CONFIG" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG"
+
+: "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
+: "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
+CONTROL_SOCKET="$CACHE_DIR/tunnel.sock"
+
+DATA="$(ssh -n "$LOGIN_TARGET" "cat '$SHARED_DIR/current' 2>/dev/null || true")"
+JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
+
+if [[ -n "$JOB" ]]; then
+    echo "Cancelling Slurm job $JOB"
+    ssh -n "$LOGIN_TARGET" "scancel '$JOB' || true"
+else
+    echo "No current Slurm endpoint found."
+fi
+
+if [[ -S "$CONTROL_SOCKET" ]]; then
+    echo "Closing local SSH tunnel"
+    ssh -S "$CONTROL_SOCKET" -O exit "$LOGIN_TARGET" >/dev/null 2>&1 || true
+    rm -f "$CONTROL_SOCKET"
+fi
+
+rm -f "$CACHE_DIR/current"
+echo "Stopped."
