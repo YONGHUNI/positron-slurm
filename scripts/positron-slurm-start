@@ -28,7 +28,6 @@ remote_sbatch=(sbatch --parsable)
 for arg in "$@"; do
     remote_sbatch+=("$arg")
 done
-remote_sbatch+=("-")
 
 printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
 printf -v quoted_remote_cmd '%q' "$remote_cmd"
