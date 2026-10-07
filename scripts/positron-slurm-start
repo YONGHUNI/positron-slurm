@@ -17,6 +17,13 @@ source "$CONFIG"
 : "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
 : "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
 
+remote_login() {
+    local cmd="$1"
+    local quoted
+    printf -v quoted '%q' "$cmd"
+    ssh -n "$LOGIN_TARGET" "bash -lc $quoted"
+}
+
 remote_sbatch=(sbatch --parsable)
 for arg in "$@"; do
     remote_sbatch+=("$arg")
@@ -24,11 +31,17 @@ done
 remote_sbatch+=("-")
 
 printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
+printf -v quoted_remote_cmd '%q' "$remote_cmd"
 
 ssh -n "$LOGIN_TARGET" "mkdir -p '$SHARED_DIR' && chmod 700 '$SHARED_DIR' && rm -f '$SHARED_DIR/current'"
 
+if ! remote_login "command -v sbatch >/dev/null"; then
+    echo "sbatch is not available in the Sapelo login-shell environment." >&2
+    exit 1
+fi
+
 SUBMIT="$(
-    ssh "$LOGIN_TARGET" "$remote_cmd" < "$SBATCH_FILE"
+    ssh "$LOGIN_TARGET" "bash -lc $quoted_remote_cmd" < "$SBATCH_FILE"
 )"
 JOB="${SUBMIT%%;*}"
 
@@ -53,7 +66,7 @@ while (( SECONDS < deadline )); do
         exit 0
     fi
 
-    STATUS="$(ssh -n "$LOGIN_TARGET" "squeue -h -j '$JOB' -o '%T' 2>/dev/null || true")"
+    STATUS="$(remote_login "squeue -h -j '$JOB' -o '%T' 2>/dev/null || true")"
     if [[ -z "$STATUS" ]]; then
         echo "Job $JOB left the queue before publishing an endpoint." >&2
         ssh -n "$LOGIN_TARGET" "tail -n 60 '$SHARED_DIR/slurm-$JOB.err' '$SHARED_DIR/slurm-$JOB.out' 2>/dev/null || true" >&2
