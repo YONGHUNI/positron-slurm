@@ -8,7 +8,6 @@ SBATCH_FILE="$REPO_DIR/slurm/positron-session.sbatch"
 
 if [[ ! -f "$CONFIG" ]]; then
     echo "Missing config: $CONFIG" >&2
-    echo "Copy examples/config.example to that path and edit it first." >&2
     exit 1
 fi
 # shellcheck source=/dev/null
@@ -17,30 +16,71 @@ source "$CONFIG"
 : "${LOGIN_TARGET:?Set LOGIN_TARGET in $CONFIG}"
 : "${SHARED_DIR:?Set SHARED_DIR in $CONFIG}"
 
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
+CONTROL_SOCKET="$CACHE_DIR/login-master.sock"
+mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
+
+master_alive() {
+    ssh -S "$CONTROL_SOCKET" -O check "$LOGIN_TARGET" >/dev/null 2>&1
+}
+
+ensure_master() {
+    if master_alive; then
+        return 0
+    fi
+
+    rm -f "$CONTROL_SOCKET"
+    echo "Opening Sapelo SSH control connection..."
+    ssh \
+        -M \
+        -S "$CONTROL_SOCKET" \
+        -fN \
+        -o ControlMaster=yes \
+        -o ControlPersist=no \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        "$LOGIN_TARGET"
+}
+
+master_ssh() {
+    ssh \
+        -S "$CONTROL_SOCKET" \
+        -o ControlMaster=auto \
+        "$LOGIN_TARGET" \
+        "$@"
+}
+
 remote_login() {
     local cmd="$1"
     local quoted
     printf -v quoted '%q' "$cmd"
-    ssh -n "$LOGIN_TARGET" "bash -lc $quoted"
+    master_ssh "bash -lc $quoted"
 }
 
-remote_sbatch=(sbatch --parsable)
-for arg in "$@"; do
-    remote_sbatch+=("$arg")
-done
+ensure_master
 
-printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
-printf -v quoted_remote_cmd '%q' "$remote_cmd"
-
-ssh -n "$LOGIN_TARGET" "mkdir -p '$SHARED_DIR' && chmod 700 '$SHARED_DIR' && rm -f '$SHARED_DIR/current'"
+remote_login "mkdir -p '$SHARED_DIR' && chmod 700 '$SHARED_DIR' && rm -f '$SHARED_DIR/current'"
 
 if ! remote_login "command -v sbatch >/dev/null"; then
     echo "sbatch is not available in the Sapelo login-shell environment." >&2
     exit 1
 fi
 
+remote_sbatch=(sbatch --parsable)
+for arg in "$@"; do
+    remote_sbatch+=("$arg")
+done
+printf -v remote_cmd '%q ' "${remote_sbatch[@]}"
+printf -v quoted_remote_cmd '%q' "$remote_cmd"
+
 SUBMIT="$(
-    ssh "$LOGIN_TARGET" "bash -lc $quoted_remote_cmd" < "$SBATCH_FILE"
+    ssh \
+        -S "$CONTROL_SOCKET" \
+        -o ControlMaster=auto \
+        "$LOGIN_TARGET" \
+        "bash -lc $quoted_remote_cmd" \
+        < "$SBATCH_FILE"
 )"
 JOB="${SUBMIT%%;*}"
 
@@ -54,11 +94,11 @@ echo "Waiting for endpoint..."
 
 deadline=$((SECONDS + 300))
 while (( SECONDS < deadline )); do
-    DATA="$(ssh -n "$LOGIN_TARGET" "cat '$SHARED_DIR/current' 2>/dev/null || true")"
+    DATA="$(master_ssh "cat '$SHARED_DIR/current' 2>/dev/null || true")"
     STATE_JOB="$(printf '%s\n' "$DATA" | awk -F= '$1=="JOB" {print $2}')"
 
     if [[ "$STATE_JOB" == "$JOB" ]]; then
-        printf '%s\n' "$DATA"
+        printf '\n%s\n' "$DATA"
         "$SCRIPT_DIR/positron-slurm-tunnel"
         echo
         echo "Connect Positron to SSH target: sapelo-slurm"
@@ -67,8 +107,9 @@ while (( SECONDS < deadline )); do
 
     STATUS="$(remote_login "squeue -h -j '$JOB' -o '%T' 2>/dev/null || true")"
     if [[ -z "$STATUS" ]]; then
+        echo >&2
         echo "Job $JOB left the queue before publishing an endpoint." >&2
-        ssh -n "$LOGIN_TARGET" "tail -n 60 '$SHARED_DIR/slurm-$JOB.err' '$SHARED_DIR/slurm-$JOB.out' 2>/dev/null || true" >&2
+        master_ssh "tail -n 60 '$SHARED_DIR/slurm-$JOB.err' '$SHARED_DIR/slurm-$JOB.out' 2>/dev/null || true" >&2
         exit 1
     fi
 
