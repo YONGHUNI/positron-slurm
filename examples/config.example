@@ -4,3 +4,4 @@
 LOGIN_TARGET="ys01849@sapelo2.gacrc.uga.edu"
 SHARED_DIR="/work/whlab/ys01849/.positron-slurm"
 LOCAL_PORT=22022
+PARTITION="inter_p"
