@@ -15,13 +15,43 @@ source "$CONFIG"
 : "${LOCAL_PORT:=22022}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/positron-slurm"
-CONTROL_SOCKET="$CACHE_DIR/tunnel.sock"
+CONTROL_SOCKET="$CACHE_DIR/login-master.sock"
 mkdir -p "$CACHE_DIR"
+chmod 700 "$CACHE_DIR"
 
-DATA="$(
-    ssh -n -o BatchMode=yes -o ConnectTimeout=10 \
-        "$LOGIN_TARGET" "cat '$SHARED_DIR/current'"
-)"
+master_alive() {
+    ssh -S "$CONTROL_SOCKET" -O check "$LOGIN_TARGET" >/dev/null 2>&1
+}
+
+ensure_master() {
+    if master_alive; then
+        return 0
+    fi
+
+    rm -f "$CONTROL_SOCKET"
+    echo "Opening Sapelo SSH control connection..."
+    ssh \
+        -M \
+        -S "$CONTROL_SOCKET" \
+        -fN \
+        -o ControlMaster=yes \
+        -o ControlPersist=no \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        "$LOGIN_TARGET"
+}
+
+master_ssh() {
+    ssh \
+        -S "$CONTROL_SOCKET" \
+        -o ControlMaster=auto \
+        "$LOGIN_TARGET" \
+        "$@"
+}
+
+ensure_master
+
+DATA="$(master_ssh "cat '$SHARED_DIR/current'")"
 
 HOST="$(printf '%s\n' "$DATA" | awk -F= '$1=="HOST" {print $2}')"
 PORT="$(printf '%s\n' "$DATA" | awk -F= '$1=="PORT" {print $2}')"
@@ -33,23 +63,23 @@ if [[ -z "$HOST" || -z "$PORT" || -z "$JOB" ]]; then
     exit 1
 fi
 
-if [[ -S "$CONTROL_SOCKET" ]]; then
-    ssh -S "$CONTROL_SOCKET" -O exit "$LOGIN_TARGET" >/dev/null 2>&1 || true
-    rm -f "$CONTROL_SOCKET"
-fi
-
 if command -v ss >/dev/null 2>&1 && ss -H -ltn | awk '{print $4}' | grep -q ":${LOCAL_PORT}$"; then
+    if [[ -f "$CACHE_DIR/current" ]] && grep -qx "JOB=$JOB" "$CACHE_DIR/current"; then
+        echo "Positron Slurm tunnel is already ready"
+        echo "LOCAL=127.0.0.1:$LOCAL_PORT"
+        echo "REMOTE=$HOST:$PORT"
+        echo "JOB=$JOB"
+        exit 0
+    fi
+
     echo "Local port $LOCAL_PORT is already in use." >&2
     exit 1
 fi
 
 ssh \
-    -M \
     -S "$CONTROL_SOCKET" \
-    -fNT \
+    -O forward \
     -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
     -L "127.0.0.1:${LOCAL_PORT}:${HOST}:${PORT}" \
     "$LOGIN_TARGET"
 
